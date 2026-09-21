@@ -1,3 +1,5 @@
+import hashlib
+import statistics
 import unittest
 
 from btcminer.hashing import hash_to_int
@@ -86,6 +88,92 @@ class TestMine(unittest.TestCase):
         # bits 0x1d00ffff over a short range: no solution, but it must not crash.
         result = mine(header(), processes=1, nonce_count=1_000)
         self.assertFalse(result.found)
+
+
+class TestSolutionRate(unittest.TestCase):
+    """Guards the class of bug that makes a miner find solutions too easily.
+
+    An off-by-one or a mis-ordered comparison in the hot loop still produces
+    hashes that look plausible, and every individual solution it reports may even
+    verify -- what goes wrong is the *rate*. These tests pin the rate down.
+
+    The sample is fixed (fixed prefixes, fixed target, search always from nonce
+    0), so these are deterministic and cannot flake; the statistical band exists
+    to size how large a rate regression must be before it trips.
+    """
+
+    # Expect one solution per 2**14 hashes: rare enough to be a real measurement,
+    # cheap enough for a unit test.
+    TARGET = 2 ** 242
+    EXPECTED_HASHES = 2 ** 256 / (TARGET + 1)
+
+    @staticmethod
+    def prefix_for(seed):
+        return BlockHeader(
+            0x20000000, bytes([seed]) * 32, b"\x02" * 32, 1_700_000_000, 0x1D00FFFF
+        )
+
+    def test_search_enumerates_exactly_the_valid_nonces(self):
+        """Every nonce search() reports is valid, and it skips none along the way."""
+        base = self.prefix_for(0x11)
+        prefix, span = base.prefix(), 150_000
+
+        # Independent brute force: plain hashlib, no midstate, no prefilter.
+        expected = []
+        for nonce in range(span):
+            digest = hashlib.sha256(
+                hashlib.sha256(prefix + nonce.to_bytes(4, "little")).digest()
+            ).digest()
+            if int.from_bytes(digest, "little") <= self.TARGET:
+                expected.append(nonce)
+
+        found, cursor = [], 0
+        while cursor < span:
+            nonce, _ = search(prefix, self.TARGET, cursor, span - cursor)
+            if nonce is None:
+                break
+            found.append(nonce)
+            cursor = nonce + 1
+
+        self.assertEqual(found, expected)
+        self.assertGreater(len(expected), 3, "the range should contain several solutions")
+
+    def test_solution_rate_matches_the_target(self):
+        """Hashes-per-solution must match 2**256/target, not come in far under it."""
+        samples = []
+        for seed in range(32):
+            base = self.prefix_for(seed)
+            nonce, tried = search(base.prefix(), self.TARGET, 0, 2_000_000)
+            self.assertIsNotNone(nonce, "every trial should terminate in a solution")
+            self.assertTrue(base.with_nonce(nonce).is_valid_pow(self.TARGET))
+            samples.append(tried)
+
+        ratio = statistics.mean(samples) / self.EXPECTED_HASHES
+        # Hashes-to-solution is geometric, so the mean of 32 trials has a standard
+        # error of ~18%. This band sits far outside that, and over 200k simulated
+        # runs never tripped -- so tripping it means the rate really has moved.
+        self.assertGreater(ratio, 0.4, f"finding solutions too easily (ratio {ratio:.3f})")
+        self.assertLess(ratio, 2.0, f"finding solutions too rarely (ratio {ratio:.3f})")
+
+    def test_cheap_rejection_boundary_is_exact(self):
+        """The loop's shortcut rests on an identity; this is that identity.
+
+        A hash read little-endian is below 2**224 exactly when its top four
+        bytes -- the last four, in that order -- are zero. So when the target is
+        below 2**224 the prefilter can only discard hashes that were going to
+        lose anyway.
+        """
+        for i in range(2_000):
+            digest = hashlib.sha256(i.to_bytes(4, "little")).digest()
+            self.assertEqual(
+                digest[28:] == b"\x00\x00\x00\x00",
+                int.from_bytes(digest, "little") < 2 ** 224,
+            )
+        for boundary in (2 ** 224 - 1, 2 ** 224, 2 ** 255):
+            digest = boundary.to_bytes(32, "little")
+            self.assertEqual(
+                digest[28:] == b"\x00\x00\x00\x00", boundary < 2 ** 224
+            )
 
 
 class TestFormatting(unittest.TestCase):

@@ -136,11 +136,21 @@ as the folding produces it.
 $ python3 -m unittest discover -s tests -v
 ```
 
-90 tests, no dependencies beyond the standard library. They check the hasher
+93 tests, no dependencies beyond the standard library. They check the hasher
 against real mainnet blocks (genesis, 125552), the merkle code against block 170
 — the Satoshi-to-Hal transaction — the BIP34 height encoding against the example
 in the BIP itself, and the Stratum client end to end against a fake pool on
 loopback.
+
+`TestSolutionRate` covers the failure mode a miner is most likely to hide: a
+comparison bug in the hot loop still emits plausible-looking hashes, and each
+one it reports may even verify — what goes wrong is how *often* it finds them.
+So one test enumerates every winning nonce in a range and demands exact
+agreement with a plain-`hashlib` brute force, and another measures
+hashes-per-solution over 32 trials and checks it against `2**256/target`. Both
+draw a fixed sample, so neither can flake. Mutating the loop to be 2x, 16x too
+lucky, to read the digest big-endian, or to return the wrong nonce is caught by
+both.
 
 ## Requirements
 
