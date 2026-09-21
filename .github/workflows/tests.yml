@@ -1,7 +1,10 @@
 name: tests
 
 on:
+  # Scoped to main: a branch with an open PR is already covered by
+  # pull_request, and listing both ran every commit twice.
   push:
+    branches: [main]
   pull_request:
 
 jobs:
